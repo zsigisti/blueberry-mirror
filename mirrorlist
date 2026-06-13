@@ -1,0 +1,16 @@
+# Blueberry package mirrors
+#
+# Canonical list of mirror base URLs for the `core` repository. Put the origin
+# first, then mirrors, on one line in the client's /etc/bpm/repos.conf:
+#
+#   core <origin> <mirror1> <mirror2> ...
+#
+# bpm tries each in order and fails over when one is unreachable. Keep this file
+# as the source of truth; clients can copy the URLs below.
+
+# origin (built + published from OBS via tools/mkrepo.sh in the blueberry repo)
+https://repo.blueberry.lan/x86_64
+
+# mirrors (each runs bpm-mirror-sync against the origin)
+# http://mirror1.blueberry.lan/x86_64
+# http://mirror2.blueberry.lan/x86_64

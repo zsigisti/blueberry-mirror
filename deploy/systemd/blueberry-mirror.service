@@ -1,0 +1,13 @@
+[Unit]
+Description=Sync the Blueberry package mirror
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Edit the upstream URL and mirror dir for this host.
+Environment=UPSTREAM=https://repo.blueberry.lan/x86_64
+Environment=MIRROR=/srv/blueberry-mirror
+ExecStart=/usr/local/bin/bpm-mirror-sync ${UPSTREAM} ${MIRROR} --prune
+# Don't run as root if you can avoid it:
+# User=mirror

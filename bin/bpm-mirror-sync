@@ -1,0 +1,64 @@
+#!/bin/sh
+# bpm-mirror-sync — mirror a Blueberry (bpm) package repository.
+#
+# Downloads the upstream bpm.index and every package it lists (verifying the
+# sha256 from the index) into a local directory, then atomically swaps in the
+# new index. Serve that directory over HTTP and it's a full mirror.
+#
+# Usage: bpm-mirror-sync <upstream-url> <mirror-dir> [--prune]
+#   --prune   delete local packages no longer present in the upstream index
+#
+# Idempotent: already-current packages (matching checksum) are skipped, so it's
+# cheap to run on a timer.
+
+set -eu
+
+UP="${1:?usage: bpm-mirror-sync <upstream-url> <mirror-dir> [--prune]}"
+DIR="${2:?usage: bpm-mirror-sync <upstream-url> <mirror-dir> [--prune]}"
+PRUNE="${3:-}"
+UP="${UP%/}"
+
+for t in wget sha256sum; do
+    command -v "$t" >/dev/null 2>&1 || { echo "bpm-mirror-sync: need $t" >&2; exit 1; }
+done
+
+mkdir -p "$DIR"
+idx=$(mktemp)
+trap 'rm -f "$idx"' EXIT
+
+echo ":: fetching index from $UP"
+wget -q -O "$idx" "$UP/bpm.index" || { echo "ERROR: cannot fetch $UP/bpm.index" >&2; exit 1; }
+
+total=0 new=0 fail=0
+while IFS='|' read -r name ver file sha deps; do
+    [ -n "$file" ] || continue
+    total=$((total + 1))
+    out="$DIR/$file"
+    if [ -f "$out" ] && [ -n "$sha" ] && \
+       [ "$(sha256sum "$out" | cut -d' ' -f1)" = "$sha" ]; then
+        continue                      # already mirrored and current
+    fi
+    echo ":: fetching $file"
+    if ! wget -q -O "$out.part" "$UP/$file"; then
+        echo "   FAILED: $file" >&2; rm -f "$out.part"; fail=$((fail + 1)); continue
+    fi
+    if [ -n "$sha" ] && [ "$(sha256sum "$out.part" | cut -d' ' -f1)" != "$sha" ]; then
+        echo "   CHECKSUM MISMATCH: $file" >&2; rm -f "$out.part"; fail=$((fail + 1)); continue
+    fi
+    mv "$out.part" "$out"
+    new=$((new + 1))
+done < "$idx"
+
+# Swap in the new index only after the packages are in place.
+cp "$idx" "$DIR/.bpm.index.new" && mv "$DIR/.bpm.index.new" "$DIR/bpm.index"
+
+if [ "$PRUNE" = "--prune" ]; then
+    for f in "$DIR"/*.pkg.tar.zst; do
+        [ -f "$f" ] || continue
+        b=$(basename "$f")
+        grep -q "|$b|" "$DIR/bpm.index" || { echo ":: pruning $b"; rm -f "$f"; }
+    done
+fi
+
+echo ":: done — $total packages in index, $new fetched, $fail failed"
+[ "$fail" -eq 0 ]

@@ -1,0 +1,4 @@
+# Mirror data — the actual packages live on disk, not in git.
+/srv/
+*.pkg.tar.zst
+bpm.index

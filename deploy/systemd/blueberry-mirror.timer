@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically sync the Blueberry package mirror
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
