@@ -1,26 +1,28 @@
 # blueberry-mirror
 
-Mirror solution for the [Blueberry Linux](https://github.com/zsigisti/blueberry)
-package repository (the `.pkg.tar.zst` + `bpm.index` produced by Blueberry's
-`tools/mkrepo.sh` from OBS builds).
+Repository infrastructure for [Blueberry Linux](https://github.com/zsigisti/blueberry).
+Two tools, two roles:
 
-A mirror is just a directory containing `bpm.index` and the package files, served
-over HTTP. `bpm-mirror-sync` keeps that directory in sync with an upstream repo
-(verifying checksums); clients list multiple mirror URLs in `/etc/bpm/repos.conf`
-and `bpm` fails over between them.
+- **`blueberry-repo-sync`** — the **origin**. Builds the package repo *from the
+  git recipes* and hosts it. Run this on one server (e.g. your Rocky box).
+- **`bpm-mirror-sync`** — an optional **mirror**. Copies an existing origin to a
+  second server for redundancy. You only need this once you have more than one
+  host serving packages.
 
 ```
-                       OBS build + tools/mkrepo.sh
+        github.com/zsigisti/blueberry  (packages/*/PKGBUILD recipes)
+                                 │
+                 blueberry-repo-sync  (git pull → build in Arch container → bpm.index)
                                  │
                           ┌──────▼───────┐
-                          │   origin     │  https://repo.blueberry.lan/x86_64
+                          │   ORIGIN     │  http://<rocky>/x86_64
                           │ bpm.index +  │
                           │ *.pkg.tar.zst│
                           └──────┬───────┘
-                bpm-mirror-sync  │  (periodic, checksum-verified)
+                  bpm-mirror-sync│  (optional, checksum-verified)
                    ┌─────────────┼─────────────┐
               ┌────▼────┐   ┌────▼────┐    ┌────▼────┐
-              │ mirror1 │   │ mirror2 │ …  │ mirrorN │   (each: nginx + timer)
+              │ mirror1 │   │ mirror2 │ …  │ mirrorN │
               └────┬────┘   └────┬────┘    └────┬────┘
                    └──────── bpm clients (failover) ──────┘
 ```
@@ -29,56 +31,90 @@ and `bpm` fails over between them.
 
 | Path | What |
 |------|------|
-| `bin/bpm-mirror-sync` | sync an upstream bpm repo into a local mirror dir |
-| `deploy/nginx-mirror.conf` | nginx site to serve the mirror |
-| `deploy/systemd/*` | service + timer for periodic syncs |
-| `mirrorlist` | canonical list of mirror URLs |
+| `bin/blueberry-repo-sync` | **build the repo from the git recipes and publish it (the origin)** |
+| `bin/bpm-mirror-sync` | copy an existing origin into a local mirror dir |
+| `deploy/blueberry-repo-sync.conf.example` | config for the origin builder |
+| `deploy/nginx-repo.conf` | nginx site for the origin |
+| `deploy/nginx-mirror.conf` | nginx site for a mirror |
+| `deploy/systemd/blueberry-repo-sync.*` | service + timer for the origin builder |
+| `deploy/systemd/blueberry-mirror.*` | service + timer for a mirror |
+| `deploy/INSTALL-rocky.md` | **step-by-step Rocky Linux 10 setup** |
+| `mirrorlist` | canonical list of repo/mirror URLs |
 
-## Run a mirror
+## The origin: `blueberry-repo-sync`
 
-On a server (Rocky/Arch/Debian — anything with `wget`, `sha256sum`, `nginx`):
+This is the "whole repo solution". On the server it:
+
+1. Clones/pulls the Blueberry git repo.
+2. Builds every `packages/*/PKGBUILD` recipe. The recipes are Arch PKGBUILDs, so
+   they need `makepkg` — which Rocky doesn't have — so the build runs inside an
+   **ephemeral Arch Linux container** (`podman`). The host only needs `git`,
+   `podman`, and `nginx`.
+3. Generates `bpm.index` and **atomically swaps** the result into the web root.
+
+Packages are **not signed** (for now); integrity is the sha256 carried in
+`bpm.index` and re-verified by `bpm` on the client.
+
+**Quick start (Rocky Linux 10):** see [`deploy/INSTALL-rocky.md`](deploy/INSTALL-rocky.md).
+The short version:
 
 ```sh
-# 1. Install the sync tool
-sudo install -Dm755 bin/bpm-mirror-sync /usr/local/bin/bpm-mirror-sync
+sudo dnf install -y git podman nginx
+sudo install -Dm755 bin/blueberry-repo-sync /usr/local/bin/blueberry-repo-sync
+sudo install -Dm644 deploy/blueberry-repo-sync.conf.example /etc/blueberry-repo-sync.conf
+sudo install -Dm644 deploy/nginx-repo.conf /etc/nginx/conf.d/blueberry-repo.conf
+sudo mkdir -p /var/www/html/x86_64 && sudo systemctl enable --now nginx
+sudo blueberry-repo-sync                     # first build (watch it)
+sudo cp deploy/systemd/blueberry-repo-sync.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now blueberry-repo-sync.timer   # rebuild hourly from git
+```
 
-# 2. First sync (origin -> local dir)
+## The mirror: `bpm-mirror-sync` (optional)
+
+Once an origin exists, a mirror is just a directory containing `bpm.index` plus
+the package files, served over HTTP. `bpm-mirror-sync` keeps it in sync with the
+origin (verifying checksums); clients list multiple URLs and `bpm` fails over.
+
+```sh
+sudo install -Dm755 bin/bpm-mirror-sync /usr/local/bin/bpm-mirror-sync
 sudo mkdir -p /srv/blueberry-mirror
-sudo bpm-mirror-sync https://repo.blueberry.lan/x86_64 /srv/blueberry-mirror --prune
-
-# 3. Serve it
+sudo bpm-mirror-sync http://<origin>/x86_64 /srv/blueberry-mirror --prune
 sudo cp deploy/nginx-mirror.conf /etc/nginx/conf.d/blueberry-mirror.conf
-#   (edit server_name; on Rocky/SELinux: restorecon -Rv /srv/blueberry-mirror)
 sudo nginx -t && sudo systemctl reload nginx
-
-# 4. Keep it fresh (edit UPSTREAM/MIRROR in the unit first)
-sudo cp deploy/systemd/blueberry-mirror.* /etc/systemd/system/
-sudo install -Dm755 bin/bpm-mirror-sync /usr/local/bin/bpm-mirror-sync
+sudo cp deploy/systemd/blueberry-mirror.* /etc/systemd/system/   # edit UPSTREAM/MIRROR
 sudo systemctl enable --now blueberry-mirror.timer
 ```
 
 `bpm-mirror-sync` is idempotent — packages whose checksum already matches are
-skipped, so the timer run is cheap. `--prune` removes local packages that have
-fallen out of the upstream index.
+skipped. `--prune` removes packages that fell out of the origin index.
 
-## Point clients at the mirrors
+## Point clients at it
 
-On a Blueberry box, list the origin plus mirrors on one line in
-`/etc/bpm/repos.conf` (order = failover order):
+On a Blueberry box, in `/etc/bpm/repos.conf` (order = failover order):
 
 ```
-core https://repo.blueberry.lan/x86_64 http://mirror1.blueberry.lan/x86_64 http://mirror2.blueberry.lan/x86_64
+blueberry http://<origin>/x86_64 http://<mirror1>/x86_64
 ```
 
-Then `bpm update && bpm install <pkg>` — bpm tries each mirror in turn and moves
-on when one is unreachable. The canonical URL list lives in `mirrorlist`.
+To also resolve upstream library dependencies (oniguruma, libevent, openssl, …)
+that the Blueberry packages link against, add the Arch repos as extra sources —
+`bpm` reads pacman `.db` files directly:
+
+```
+blueberry http://<origin>/x86_64
+extra     https://geo.mirror.pkgbuild.com/extra/os/x86_64
+core      https://geo.mirror.pkgbuild.com/core/os/x86_64
+```
+
+Then `bpm update && bpm install vim`. Base packages (glibc, bash, …) are skipped
+via `/etc/bpm/provided`.
 
 ## Notes
 
-- Integrity is end-to-end: the origin `bpm.index` carries each package's sha256,
-  `bpm-mirror-sync` verifies it on download, and `bpm` re-verifies on the client.
-  A malicious or broken mirror can't serve a tampered package.
-- Mirrors are stateless copies — no database, no server-side code. Losing a
-  mirror loses nothing; re-run the sync.
-- To mirror over the WAN cheaply, run the timer less often or front nginx with a
-  CDN; package filenames are version-stamped and immutable, so they cache well.
+- **No package signing.** Integrity is the sha256 in `bpm.index`, fetched over
+  HTTP. Put it behind HTTPS or a trusted LAN for tamper resistance.
+- Integrity is end-to-end: the origin records each sha256, mirrors verify on
+  download, and `bpm` re-verifies on the client.
+- Mirrors are stateless copies — no database, no server-side code. Losing one
+  loses nothing; re-run the sync.

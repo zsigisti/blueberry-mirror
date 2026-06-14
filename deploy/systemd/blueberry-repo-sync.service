@@ -1,0 +1,13 @@
+[Unit]
+Description=Build and publish the Blueberry package repo from git
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Override defaults in /etc/blueberry-repo-sync.conf (see deploy/blueberry-repo-sync.conf.example).
+ExecStart=/usr/local/bin/blueberry-repo-sync
+TimeoutStartSec=3600
+# Building pulls an Arch image and compiles sources; give it room.
+Nice=10
+IOSchedulingClass=idle

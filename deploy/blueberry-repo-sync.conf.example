@@ -1,0 +1,16 @@
+# /etc/blueberry-repo-sync.conf — overrides for blueberry-repo-sync.
+# Copy to /etc/blueberry-repo-sync.conf and edit. All values are optional.
+
+# Git repo holding the PKGBUILD recipes (packages/*/PKGBUILD).
+REPO_URL=https://github.com/zsigisti/blueberry.git
+BRANCH=master
+
+# Working directory: holds the git clone and the build staging area.
+WORK=/var/lib/blueberry-repo
+
+# Published web root — point your nginx server block here.
+OUT=/var/www/html/x86_64
+
+# Container engine and build image. Rocky Linux ships podman.
+ENGINE=podman
+IMAGE=docker.io/library/archlinux:latest

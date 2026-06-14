@@ -1,0 +1,104 @@
+#!/bin/sh
+# blueberry-repo-sync — build the Blueberry package repo from git and publish it.
+#
+# Pulls the Blueberry git repo, builds every packages/*/PKGBUILD recipe, writes
+# the bpm.index, and atomically swaps the result into the web root. Serve that
+# directory over HTTP (nginx) and it's a complete Blueberry package repository.
+#
+# The recipes are Arch PKGBUILDs, so they're built with makepkg. Rocky Linux has
+# no makepkg, so the build runs inside an ephemeral Arch Linux container via
+# podman (or docker). The host only needs `git` and `podman` — no Arch tooling.
+#
+# Packages are NOT signed (yet); bpm verifies the sha256 from bpm.index instead.
+#
+# Usage:  blueberry-repo-sync [--once]
+# Config (env or /etc/blueberry-repo-sync.conf):
+#   REPO_URL   git repo to build from   (default: github.com/zsigisti/blueberry)
+#   BRANCH     branch to build          (default: master)
+#   WORK       working dir for the clone(default: /var/lib/blueberry-repo)
+#   OUT        published web root        (default: /var/www/html/x86_64)
+#   ENGINE     podman | docker          (default: podman)
+#   IMAGE      build image              (default: docker.io/library/archlinux:latest)
+
+set -eu
+
+# Optional config file overrides the defaults below.
+[ -f /etc/blueberry-repo-sync.conf ] && . /etc/blueberry-repo-sync.conf
+
+REPO_URL="${REPO_URL:-https://github.com/zsigisti/blueberry.git}"
+BRANCH="${BRANCH:-master}"
+WORK="${WORK:-/var/lib/blueberry-repo}"
+OUT="${OUT:-/var/www/html/x86_64}"
+ENGINE="${ENGINE:-podman}"
+IMAGE="${IMAGE:-docker.io/library/archlinux:latest}"
+
+log() { printf ':: %s\n' "$*"; }
+die() { printf 'blueberry-repo-sync: %s\n' "$*" >&2; exit 1; }
+
+for t in git "$ENGINE"; do
+    command -v "$t" >/dev/null 2>&1 || die "required tool not found: $t"
+done
+
+SRC="$WORK/repo"
+STAGE="$WORK/stage"        # container writes packages + bpm.index here
+mkdir -p "$WORK"
+
+# ── 1. fetch the recipes from git ─────────────────────────────────────────────
+if [ -d "$SRC/.git" ]; then
+    log "updating $SRC ($BRANCH)"
+    git -C "$SRC" fetch --quiet origin "$BRANCH"
+    git -C "$SRC" reset --quiet --hard "origin/$BRANCH"
+else
+    log "cloning $REPO_URL"
+    rm -rf "$SRC"
+    git clone --quiet --branch "$BRANCH" --depth 1 "$REPO_URL" "$SRC"
+fi
+[ -d "$SRC/packages" ] || die "no packages/ directory in $SRC"
+
+# ── 2. build every recipe inside an Arch container ────────────────────────────
+# makepkg refuses to run as root, so we create an unprivileged 'builder' user
+# (with passwordless sudo, which makepkg -s uses to install build deps). The
+# container is ephemeral: deps are installed fresh each run, nothing persists.
+rm -rf "$STAGE"; mkdir -p "$STAGE"
+
+BUILD_SCRIPT='
+set -eu
+pacman -Syu --noconfirm --needed base-devel git >/dev/null
+useradd -m builder
+echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+cp -a /repo /tmp/b
+chown -R builder /tmp/b /out
+fail=0
+for d in /tmp/b/packages/*/; do
+    [ -f "${d}PKGBUILD" ] || continue
+    n=$(basename "$d")
+    echo ":: building $n"
+    if ! su builder -c "cd \"$d\" && PKGDEST=/out makepkg -f --skippgpcheck --noconfirm -s"; then
+        echo "!! FAILED: $n" >&2; fail=$((fail+1))
+    fi
+done
+rm -f /out/*-debug-*.pkg.tar.zst
+su builder -c "cd /tmp/b && sh tools/mkrepo.sh /out"
+echo ":: build done ($fail failed)"
+[ "$fail" -eq 0 ]
+'
+
+log "building in $ENGINE ($IMAGE)"
+# :z relabels the bind mounts for SELinux (Rocky enforces it by default).
+"$ENGINE" run --rm \
+    -v "$SRC:/repo:ro,z" \
+    -v "$STAGE:/out:z" \
+    "$IMAGE" bash -euc "$BUILD_SCRIPT"
+
+[ -f "$STAGE/bpm.index" ] || die "build produced no bpm.index"
+log "$(wc -l < "$STAGE/bpm.index") packages built"
+
+# ── 3. publish: atomically swap the staging dir into the web root ─────────────
+mkdir -p "$(dirname "$OUT")"
+rm -rf "$OUT.new"
+cp -a "$STAGE" "$OUT.new"
+rm -rf "$OUT.old"
+[ -d "$OUT" ] && mv "$OUT" "$OUT.old"
+mv "$OUT.new" "$OUT"
+rm -rf "$OUT.old"
+log "published to $OUT"
