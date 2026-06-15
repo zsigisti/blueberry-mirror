@@ -9,7 +9,10 @@
 # no makepkg, so the build runs inside an ephemeral Arch Linux container via
 # podman (or docker). The host only needs `git` and `podman` — no Arch tooling.
 #
-# Packages are NOT signed (yet); bpm verifies the sha256 from bpm.index instead.
+# The published bpm.index is signed on the HOST (never inside the ephemeral
+# container) with an ECDSA P-256 key; bpm refuses an index that isn't signed by
+# the trusted maintainer key baked into it. Each package's sha256 in the index
+# then anchors the package files themselves.
 #
 # Usage:  blueberry-repo-sync [--once]
 # Config (env or /etc/blueberry-repo-sync.conf):
@@ -19,6 +22,8 @@
 #   OUT        published web root        (default: /var/www/html/x86_64)
 #   ENGINE     podman | docker          (default: podman)
 #   IMAGE      build image              (default: docker.io/library/archlinux:latest)
+#   SIGN_KEY   ECDSA P-256 private key   (default: /etc/blueberry/repo-signing-key.pem)
+#   ALLOW_UNSIGNED  set to 1 to publish without signing (NOT recommended)
 
 set -eu
 
@@ -31,6 +36,8 @@ WORK="${WORK:-/var/lib/blueberry-repo}"
 OUT="${OUT:-/var/www/html/x86_64}"
 ENGINE="${ENGINE:-podman}"
 IMAGE="${IMAGE:-docker.io/library/archlinux:latest}"
+SIGN_KEY="${SIGN_KEY:-/etc/blueberry/repo-signing-key.pem}"
+ALLOW_UNSIGNED="${ALLOW_UNSIGNED:-0}"
 
 log() { printf ':: %s\n' "$*"; }
 die() { printf 'blueberry-repo-sync: %s\n' "$*" >&2; exit 1; }
@@ -38,6 +45,10 @@ die() { printf 'blueberry-repo-sync: %s\n' "$*" >&2; exit 1; }
 for t in git "$ENGINE"; do
     command -v "$t" >/dev/null 2>&1 || die "required tool not found: $t"
 done
+if [ "$ALLOW_UNSIGNED" != 1 ]; then
+    command -v openssl >/dev/null 2>&1 || die "openssl required for signing (or set ALLOW_UNSIGNED=1)"
+    [ -f "$SIGN_KEY" ] || die "signing key not found: $SIGN_KEY (or set ALLOW_UNSIGNED=1)"
+fi
 
 SRC="$WORK/repo"
 STAGE="$WORK/stage"        # container writes packages + bpm.index here
@@ -92,6 +103,18 @@ log "building in $ENGINE ($IMAGE)"
 
 [ -f "$STAGE/bpm.index" ] || die "build produced no bpm.index"
 log "$(wc -l < "$STAGE/bpm.index") packages built"
+
+# ── 2b. sign the index on the host (the key never enters the container) ────────
+# mkrepo inside the container leaves the index unsigned (no key there); we sign
+# it here with the maintainer key so bpm will accept it.
+rm -f "$STAGE/bpm.index.sig"
+if [ "$ALLOW_UNSIGNED" = 1 ]; then
+    log "ALLOW_UNSIGNED=1 — publishing without a signature (bpm will reject it)"
+else
+    openssl dgst -sha256 -sign "$SIGN_KEY" -out "$STAGE/bpm.index.sig" "$STAGE/bpm.index" \
+        || die "failed to sign bpm.index with $SIGN_KEY"
+    log "signed bpm.index ($SIGN_KEY)"
+fi
 
 # ── 3. publish: atomically swap the staging dir into the web root ─────────────
 mkdir -p "$(dirname "$OUT")"

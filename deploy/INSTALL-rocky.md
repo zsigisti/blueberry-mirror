@@ -3,13 +3,14 @@
 `blueberry-repo-sync` turns the PKGBUILD recipes in the Blueberry git repo into
 a hosted package repository. It builds them inside an ephemeral Arch Linux
 container (Rocky has no `makepkg`), so the only host dependencies are **git**,
-**podman**, and **nginx**. Packages are **not signed** — `bpm` verifies the
-sha256 from `bpm.index`.
+**podman**, **openssl**, and **nginx**. The `bpm.index` is **signed on the host**
+with an ECDSA P-256 key (`bpm` rejects an index not signed by the trusted key);
+each package's sha256 in the index then anchors the package files.
 
 ## 1. Install prerequisites
 
 ```sh
-sudo dnf install -y git podman nginx
+sudo dnf install -y git podman openssl nginx
 ```
 
 ## 2. Install the script and config
@@ -72,10 +73,33 @@ Then `bpm update && bpm install vim`. To also resolve upstream library
 dependencies (oniguruma, libevent, openssl, …) add the Arch repos as extra
 sources — see the main README.
 
+## Signing key
+
+The host signs `bpm.index` so clients will trust it. Generate the key once and
+keep it private (root-only):
+
+```sh
+sudo mkdir -p /etc/blueberry
+sudo openssl ecparam -name prime256v1 -genkey -noout \
+    -out /etc/blueberry/repo-signing-key.pem
+sudo chmod 600 /etc/blueberry/repo-signing-key.pem
+```
+
+Then bake the **public** half into `bpm` so installed systems trust this repo:
+on a machine with the Blueberry git checkout, copy the private key there and run
+`tools/mkrepokey.sh /path/to/repo-signing-key.pem`, rebuild the image, and
+reinstall. (The private key never needs to leave the server if you instead copy
+just the public point; `mkrepokey.sh` only reads the public half.)
+
+`blueberry-repo-sync` reads `SIGN_KEY` (default
+`/etc/blueberry/repo-signing-key.pem`). To publish without signing during
+bring-up, set `ALLOW_UNSIGNED=1` — clients then need `BPM_ALLOW_UNSIGNED=1`.
+
 ## Notes
 
-- **No signing.** Integrity is the sha256 in `bpm.index`, fetched over HTTP.
-  Put it behind HTTPS (or a trusted LAN) if you care about tamper resistance.
+- **Signed index.** `bpm` verifies the ECDSA signature on `bpm.index` against
+  its baked-in key, then the per-package sha256 anchors the files. Still put the
+  repo behind HTTPS so the package downloads themselves aren't tampered in flight.
 - **Rootless podman** works too; if you run the timer as a non-root user, make
   sure that user owns `WORK` and can write `OUT`.
 - A build failure in one recipe doesn't abort the rest, but it does fail the

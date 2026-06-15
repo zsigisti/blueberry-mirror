@@ -14,3 +14,14 @@ OUT=/var/www/html/x86_64
 # Container engine and build image. Rocky Linux ships podman.
 ENGINE=podman
 IMAGE=docker.io/library/archlinux:latest
+
+# Index signing. The published bpm.index is signed on the host with this
+# ECDSA P-256 private key; bpm refuses an index not signed by the matching
+# baked-in key. Generate with:
+#   openssl ecparam -name prime256v1 -genkey -noout -out repo-signing-key.pem
+# and bake the public half into bpm (tools/mkrepokey.sh in the blueberry repo).
+SIGN_KEY=/etc/blueberry/repo-signing-key.pem
+
+# Set to 1 to publish an UNSIGNED index (clients reject it unless they set
+# BPM_ALLOW_UNSIGNED). Leave at 0 in production.
+ALLOW_UNSIGNED=0
