@@ -96,7 +96,16 @@ echo ":: build done ($fail failed)"
 
 log "building in $ENGINE ($IMAGE)"
 # :z relabels the bind mounts for SELinux (Rocky enforces it by default).
+# --ipc=host: makepkg packages under fakeroot, which talks to its faked daemon
+#   over SysV message queues. In podman's private IPC namespace (esp. on Rocky)
+#   that corrupts with "libfakeroot internal error: payload not recognized!" and
+#   the package write fails; sharing the host IPC namespace fixes it.
+# --security-opt seccomp=unconfined: Rocky's tightened seccomp filter otherwise
+#   blocks some of the IPC/syscall surface fakeroot needs. The build container
+#   is ephemeral and trusted, so this is safe here.
 "$ENGINE" run --rm \
+    --ipc=host \
+    --security-opt seccomp=unconfined \
     -v "$SRC:/repo:ro,z" \
     -v "$STAGE:/out:z" \
     "$IMAGE" bash -euc "$BUILD_SCRIPT"
