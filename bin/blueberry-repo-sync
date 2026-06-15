@@ -34,6 +34,7 @@ REPO_URL="${REPO_URL:-https://github.com/zsigisti/blueberry.git}"
 BRANCH="${BRANCH:-master}"
 WORK="${WORK:-/var/lib/blueberry-repo}"
 OUT="${OUT:-/var/www/html/x86_64}"
+CACHE="${CACHE:-$WORK/pkgcache}"   # persistent built-package cache (see below)
 ENGINE="${ENGINE:-podman}"
 IMAGE="${IMAGE:-docker.io/library/archlinux:latest}"
 SIGN_KEY="${SIGN_KEY:-/etc/blueberry/repo-signing-key.pem}"
@@ -52,7 +53,7 @@ fi
 
 SRC="$WORK/repo"
 STAGE="$WORK/stage"        # container writes packages + bpm.index here
-mkdir -p "$WORK"
+mkdir -p "$WORK" "$CACHE"
 
 # ── 1. fetch the recipes from git ─────────────────────────────────────────────
 if [ -d "$SRC/.git" ]; then
@@ -70,6 +71,13 @@ fi
 # makepkg refuses to run as root, so we create an unprivileged 'builder' user
 # (with passwordless sudo, which makepkg -s uses to install build deps). The
 # container is ephemeral: deps are installed fresh each run, nothing persists.
+#
+# Per-package caching: built packages are kept in $CACHE across runs, keyed by
+# the SHA-256 of each PKGBUILD. A recipe is rebuilt only when its PKGBUILD
+# changes (and since each recipe's sha256sums pin its source, that hash is a
+# complete "nothing changed" signal). This is why we hash rather than compare
+# mtimes — `git reset --hard` rewrites every file's mtime each run. The upshot:
+# unchanged packages (e.g. gcc) are reused in seconds instead of recompiling.
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 
 BUILD_SCRIPT='
@@ -83,19 +91,32 @@ echo "OPTIONS+=(!debug)" >> /etc/makepkg.conf
 useradd -m builder
 echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
 cp -a /repo /tmp/b
-chown -R builder /tmp/b /out
-fail=0
+chown -R builder /tmp/b /out /cache
+fail=0; built=0; cached=0
 for d in /tmp/b/packages/*/; do
     [ -f "${d}PKGBUILD" ] || continue
     n=$(basename "$d")
+    h=$(sha256sum "${d}PKGBUILD" | cut -d" " -f1)
+    stamp="/cache/$n.stamp"
+    # Cache hit: PKGBUILD unchanged and a cached package is present -> reuse it.
+    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$h" ] \
+       && ls /cache/"$n"-*.pkg.tar.zst >/dev/null 2>&1; then
+        cp -a /cache/"$n"-*.pkg.tar.zst /out/
+        echo ":: cached $n"; cached=$((cached+1)); continue
+    fi
     echo ":: building $n"
-    if ! su builder -c "cd \"$d\" && PKGDEST=/out makepkg -f --skippgpcheck --noconfirm -s"; then
+    if su builder -c "cd \"$d\" && PKGDEST=/out makepkg -f --skippgpcheck --noconfirm -s"; then
+        # Refresh this package'"'"'s cache entry (drop any stale version first).
+        rm -f /cache/"$n"-*.pkg.tar.zst
+        cp -a /out/"$n"-*.pkg.tar.zst /cache/ 2>/dev/null || true
+        echo "$h" > "$stamp"; built=$((built+1))
+    else
         echo "!! FAILED: $n" >&2; fail=$((fail+1))
     fi
 done
 rm -f /out/*-debug-*.pkg.tar.zst
 su builder -c "cd /tmp/b && sh tools/mkrepo.sh /out"
-echo ":: build done ($fail failed)"
+echo ":: build done ($built built, $cached cached, $fail failed)"
 [ "$fail" -eq 0 ]
 '
 
@@ -113,6 +134,7 @@ log "building in $ENGINE ($IMAGE)"
     --security-opt seccomp=unconfined \
     -v "$SRC:/repo:ro,z" \
     -v "$STAGE:/out:z" \
+    -v "$CACHE:/cache:z" \
     "$IMAGE" bash -euc "$BUILD_SCRIPT"
 
 [ -f "$STAGE/bpm.index" ] || die "build produced no bpm.index"

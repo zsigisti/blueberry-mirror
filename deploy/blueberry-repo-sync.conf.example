@@ -8,6 +8,12 @@ BRANCH=master
 # Working directory: holds the git clone and the build staging area.
 WORK=/var/lib/blueberry-repo
 
+# Built-package cache (persists across runs). A recipe is rebuilt only when its
+# PKGBUILD changes, keyed by the PKGBUILD's SHA-256 — so unchanged packages
+# (e.g. gcc) are reused in seconds instead of recompiled every sync. Delete this
+# directory to force a full rebuild. Defaults to $WORK/pkgcache.
+#CACHE=/var/lib/blueberry-repo/pkgcache
+
 # Published web root — point your nginx server block here.
 OUT=/var/www/html/x86_64
 

@@ -100,6 +100,11 @@ bring-up, set `ALLOW_UNSIGNED=1` — clients then need `BPM_ALLOW_UNSIGNED=1`.
 - **Signed index.** `bpm` verifies the ECDSA signature on `bpm.index` against
   its baked-in key, then the per-package sha256 anchors the files. Still put the
   repo behind HTTPS so the package downloads themselves aren't tampered in flight.
+- **Per-package cache.** Built packages are cached in `$CACHE`
+  (default `$WORK/pkgcache`), keyed by each PKGBUILD's SHA-256. Only recipes
+  whose PKGBUILD changed are rebuilt, so an hourly sync reuses gcc & co. in
+  seconds — the first run is slow (compiles everything), later runs are fast.
+  `rm -rf $WORK/pkgcache` forces a full rebuild.
 - **Rootless podman** works too; if you run the timer as a non-root user, make
   sure that user owns `WORK` and can write `OUT`.
 - A build failure in one recipe doesn't abort the rest, but it does fail the
